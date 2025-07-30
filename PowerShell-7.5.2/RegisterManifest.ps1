@@ -1,0 +1,315 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+<#
+.Synopsis
+    Registers or unregisters the PowerShell ETW manifest
+.Parameter Path
+    The fully qualified path to the PowerShell.Core.Instrumentation.man manifest file.
+    The default value is the location of this script.
+
+.Parameter Unregister
+    Specify to unregister the manifest.
+.Notes
+    The PowerShell.Core.Instrumentation.man and PowerShell.Core.Instrumentation.dll files are
+    expected to be at the location specified by the Path parameter.
+    When registered, PowerShell.Core.Instrumentation.dll is locked to prevent deleting or changing.
+    To update the binary, first unregister the manifest using the -Unregister switch.
+#>
+[CmdletBinding()]
+param
+(
+    [ValidateNotNullOrEmpty()]
+    [string] $Path = $PSScriptRoot,
+
+    [switch] $Unregister
+)
+Set-StrictMode -Version 3.0
+$ErrorActionPreference = 'Stop'
+
+function Start-NativeExecution([scriptblock]$sb, [switch]$IgnoreExitcode)
+{
+    $backupEAP = $script:ErrorActionPreference
+    $script:ErrorActionPreference = "Continue"
+    try
+    {
+        & $sb
+        # note, if $sb doesn't have a native invocation, $LASTEXITCODE will
+        # point to the obsolete value
+        if ($LASTEXITCODE -ne 0 -and -not $IgnoreExitcode)
+        {
+            throw "Execution of {$sb} failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally
+    {
+        $script:ErrorActionPreference = $backupEAP
+    }
+}
+
+function Test-Elevated
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    Param()
+
+    # if the current Powershell session was called with administrator privileges,
+    # the Administrator Group's well-known SID will show up in the Groups for the current identity.
+    # Note that the SID won't show up unless the process is elevated.
+    return (([Security.Principal.WindowsIdentity]::GetCurrent()).Groups -contains "S-1-5-32-544")
+}
+$IsWindowsOs = $PSHOME.EndsWith('\WindowsPowerShell\v1.0', [System.StringComparison]::OrdinalIgnoreCase) -or $IsWindows
+
+if (-not $IsWindowsOs)
+{
+    throw 'This script must be run on Windows.'
+}
+
+if (-not (Test-Elevated))
+{
+    throw 'This script must be run from an elevated process.'
+}
+
+$manifest = Get-Item -Path (Join-Path -Path $Path -ChildPath 'PowerShell.Core.Instrumentation.man')
+$binary = Get-Item -Path (Join-Path -Path $Path -ChildPath 'PowerShell.Core.Instrumentation.dll')
+
+$files = @($manifest, $binary)
+foreach ($file in $files)
+{
+    if (-not (Test-Path -Path $file))
+    {
+        throw "Could not find $($file.Name) at $Path"
+    }
+}
+
+[string] $command = 'wevtutil um "{0}"' -f $manifest.FullName
+
+# Unregister if present. Avoids warnings when registering the manifest
+# and it is already registered.
+Write-Verbose "unregister the manifest, if present: $command"
+Start-NativeExecution {Invoke-Expression $command} $true
+
+if (-not $Unregister)
+{
+    $command = 'wevtutil.exe im "{0}" /rf:"{1}" /mf:"{1}"' -f $manifest.FullName, $binary.FullName
+    Write-Verbose -Message "Register the manifest: $command"
+    Start-NativeExecution { Invoke-Expression $command }
+}
+
+# SIG # Begin signature block
+# MIIoKwYJKoZIhvcNAQcCoIIoHDCCKBgCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC1/q5FJbWVjBBd
+# zdmm1gMERAVvJK3uGRSGbK2+M2jUNKCCDXYwggX0MIID3KADAgECAhMzAAAEBGx0
+# Bv9XKydyAAAAAAQEMA0GCSqGSIb3DQEBCwUAMH4xCzAJBgNVBAYTAlVTMRMwEQYD
+# VQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNy
+# b3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNpZ25p
+# bmcgUENBIDIwMTEwHhcNMjQwOTEyMjAxMTE0WhcNMjUwOTExMjAxMTE0WjB0MQsw
+# CQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9u
+# ZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMR4wHAYDVQQDExVNaWNy
+# b3NvZnQgQ29ycG9yYXRpb24wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIB
+# AQC0KDfaY50MDqsEGdlIzDHBd6CqIMRQWW9Af1LHDDTuFjfDsvna0nEuDSYJmNyz
+# NB10jpbg0lhvkT1AzfX2TLITSXwS8D+mBzGCWMM/wTpciWBV/pbjSazbzoKvRrNo
+# DV/u9omOM2Eawyo5JJJdNkM2d8qzkQ0bRuRd4HarmGunSouyb9NY7egWN5E5lUc3
+# a2AROzAdHdYpObpCOdeAY2P5XqtJkk79aROpzw16wCjdSn8qMzCBzR7rvH2WVkvF
+# HLIxZQET1yhPb6lRmpgBQNnzidHV2Ocxjc8wNiIDzgbDkmlx54QPfw7RwQi8p1fy
+# 4byhBrTjv568x8NGv3gwb0RbAgMBAAGjggFzMIIBbzAfBgNVHSUEGDAWBgorBgEE
+# AYI3TAgBBggrBgEFBQcDAzAdBgNVHQ4EFgQU8huhNbETDU+ZWllL4DNMPCijEU4w
+# RQYDVR0RBD4wPKQ6MDgxHjAcBgNVBAsTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEW
+# MBQGA1UEBRMNMjMwMDEyKzUwMjkyMzAfBgNVHSMEGDAWgBRIbmTlUAXTgqoXNzci
+# tW2oynUClTBUBgNVHR8ETTBLMEmgR6BFhkNodHRwOi8vd3d3Lm1pY3Jvc29mdC5j
+# b20vcGtpb3BzL2NybC9NaWNDb2RTaWdQQ0EyMDExXzIwMTEtMDctMDguY3JsMGEG
+# CCsGAQUFBwEBBFUwUzBRBggrBgEFBQcwAoZFaHR0cDovL3d3dy5taWNyb3NvZnQu
+# Y29tL3BraW9wcy9jZXJ0cy9NaWNDb2RTaWdQQ0EyMDExXzIwMTEtMDctMDguY3J0
+# MAwGA1UdEwEB/wQCMAAwDQYJKoZIhvcNAQELBQADggIBAIjmD9IpQVvfB1QehvpC
+# Ge7QeTQkKQ7j3bmDMjwSqFL4ri6ae9IFTdpywn5smmtSIyKYDn3/nHtaEn0X1NBj
+# L5oP0BjAy1sqxD+uy35B+V8wv5GrxhMDJP8l2QjLtH/UglSTIhLqyt8bUAqVfyfp
+# h4COMRvwwjTvChtCnUXXACuCXYHWalOoc0OU2oGN+mPJIJJxaNQc1sjBsMbGIWv3
+# cmgSHkCEmrMv7yaidpePt6V+yPMik+eXw3IfZ5eNOiNgL1rZzgSJfTnvUqiaEQ0X
+# dG1HbkDv9fv6CTq6m4Ty3IzLiwGSXYxRIXTxT4TYs5VxHy2uFjFXWVSL0J2ARTYL
+# E4Oyl1wXDF1PX4bxg1yDMfKPHcE1Ijic5lx1KdK1SkaEJdto4hd++05J9Bf9TAmi
+# u6EK6C9Oe5vRadroJCK26uCUI4zIjL/qG7mswW+qT0CW0gnR9JHkXCWNbo8ccMk1
+# sJatmRoSAifbgzaYbUz8+lv+IXy5GFuAmLnNbGjacB3IMGpa+lbFgih57/fIhamq
+# 5VhxgaEmn/UjWyr+cPiAFWuTVIpfsOjbEAww75wURNM1Imp9NJKye1O24EspEHmb
+# DmqCUcq7NqkOKIG4PVm3hDDED/WQpzJDkvu4FrIbvyTGVU01vKsg4UfcdiZ0fQ+/
+# V0hf8yrtq9CkB8iIuk5bBxuPMIIHejCCBWKgAwIBAgIKYQ6Q0gAAAAAAAzANBgkq
+# hkiG9w0BAQsFADCBiDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24x
+# EDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlv
+# bjEyMDAGA1UEAxMpTWljcm9zb2Z0IFJvb3QgQ2VydGlmaWNhdGUgQXV0aG9yaXR5
+# IDIwMTEwHhcNMTEwNzA4MjA1OTA5WhcNMjYwNzA4MjEwOTA5WjB+MQswCQYDVQQG
+# EwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwG
+# A1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSgwJgYDVQQDEx9NaWNyb3NvZnQg
+# Q29kZSBTaWduaW5nIFBDQSAyMDExMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIIC
+# CgKCAgEAq/D6chAcLq3YbqqCEE00uvK2WCGfQhsqa+laUKq4BjgaBEm6f8MMHt03
+# a8YS2AvwOMKZBrDIOdUBFDFC04kNeWSHfpRgJGyvnkmc6Whe0t+bU7IKLMOv2akr
+# rnoJr9eWWcpgGgXpZnboMlImEi/nqwhQz7NEt13YxC4Ddato88tt8zpcoRb0Rrrg
+# OGSsbmQ1eKagYw8t00CT+OPeBw3VXHmlSSnnDb6gE3e+lD3v++MrWhAfTVYoonpy
+# 4BI6t0le2O3tQ5GD2Xuye4Yb2T6xjF3oiU+EGvKhL1nkkDstrjNYxbc+/jLTswM9
+# sbKvkjh+0p2ALPVOVpEhNSXDOW5kf1O6nA+tGSOEy/S6A4aN91/w0FK/jJSHvMAh
+# dCVfGCi2zCcoOCWYOUo2z3yxkq4cI6epZuxhH2rhKEmdX4jiJV3TIUs+UsS1Vz8k
+# A/DRelsv1SPjcF0PUUZ3s/gA4bysAoJf28AVs70b1FVL5zmhD+kjSbwYuER8ReTB
+# w3J64HLnJN+/RpnF78IcV9uDjexNSTCnq47f7Fufr/zdsGbiwZeBe+3W7UvnSSmn
+# Eyimp31ngOaKYnhfsi+E11ecXL93KCjx7W3DKI8sj0A3T8HhhUSJxAlMxdSlQy90
+# lfdu+HggWCwTXWCVmj5PM4TasIgX3p5O9JawvEagbJjS4NaIjAsCAwEAAaOCAe0w
+# ggHpMBAGCSsGAQQBgjcVAQQDAgEAMB0GA1UdDgQWBBRIbmTlUAXTgqoXNzcitW2o
+# ynUClTAZBgkrBgEEAYI3FAIEDB4KAFMAdQBiAEMAQTALBgNVHQ8EBAMCAYYwDwYD
+# VR0TAQH/BAUwAwEB/zAfBgNVHSMEGDAWgBRyLToCMZBDuRQFTuHqp8cx0SOJNDBa
+# BgNVHR8EUzBRME+gTaBLhklodHRwOi8vY3JsLm1pY3Jvc29mdC5jb20vcGtpL2Ny
+# bC9wcm9kdWN0cy9NaWNSb29DZXJBdXQyMDExXzIwMTFfMDNfMjIuY3JsMF4GCCsG
+# AQUFBwEBBFIwUDBOBggrBgEFBQcwAoZCaHR0cDovL3d3dy5taWNyb3NvZnQuY29t
+# L3BraS9jZXJ0cy9NaWNSb29DZXJBdXQyMDExXzIwMTFfMDNfMjIuY3J0MIGfBgNV
+# HSAEgZcwgZQwgZEGCSsGAQQBgjcuAzCBgzA/BggrBgEFBQcCARYzaHR0cDovL3d3
+# dy5taWNyb3NvZnQuY29tL3BraW9wcy9kb2NzL3ByaW1hcnljcHMuaHRtMEAGCCsG
+# AQUFBwICMDQeMiAdAEwAZQBnAGEAbABfAHAAbwBsAGkAYwB5AF8AcwB0AGEAdABl
+# AG0AZQBuAHQALiAdMA0GCSqGSIb3DQEBCwUAA4ICAQBn8oalmOBUeRou09h0ZyKb
+# C5YR4WOSmUKWfdJ5DJDBZV8uLD74w3LRbYP+vj/oCso7v0epo/Np22O/IjWll11l
+# hJB9i0ZQVdgMknzSGksc8zxCi1LQsP1r4z4HLimb5j0bpdS1HXeUOeLpZMlEPXh6
+# I/MTfaaQdION9MsmAkYqwooQu6SpBQyb7Wj6aC6VoCo/KmtYSWMfCWluWpiW5IP0
+# wI/zRive/DvQvTXvbiWu5a8n7dDd8w6vmSiXmE0OPQvyCInWH8MyGOLwxS3OW560
+# STkKxgrCxq2u5bLZ2xWIUUVYODJxJxp/sfQn+N4sOiBpmLJZiWhub6e3dMNABQam
+# ASooPoI/E01mC8CzTfXhj38cbxV9Rad25UAqZaPDXVJihsMdYzaXht/a8/jyFqGa
+# J+HNpZfQ7l1jQeNbB5yHPgZ3BtEGsXUfFL5hYbXw3MYbBL7fQccOKO7eZS/sl/ah
+# XJbYANahRr1Z85elCUtIEJmAH9AAKcWxm6U/RXceNcbSoqKfenoi+kiVH6v7RyOA
+# 9Z74v2u3S5fi63V4GuzqN5l5GEv/1rMjaHXmr/r8i+sLgOppO6/8MO0ETI7f33Vt
+# Y5E90Z1WTk+/gFcioXgRMiF670EKsT/7qMykXcGhiJtXcVZOSEXAQsmbdlsKgEhr
+# /Xmfwb1tbWrJUnMTDXpQzTGCGgswghoHAgEBMIGVMH4xCzAJBgNVBAYTAlVTMRMw
+# EQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVN
+# aWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNp
+# Z25pbmcgUENBIDIwMTECEzMAAAQEbHQG/1crJ3IAAAAABAQwDQYJYIZIAWUDBAIB
+# BQCgga4wGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEO
+# MAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIDSC4uosoXy/3fIdnGqnAMwp
+# HzMziQZzA2s4AVUXNqXFMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8A
+# cwBvAGYAdKEagBhodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEB
+# BQAEggEAiPGq8gC2eG0BscurOQhLwC3nKVrRv6hbMBrVyaKgPy1eNOsKRkDhHzB/
+# 63683d4hwwl9tZpVA5xysiQy4RlYwOiVVnRLvYy67Tk8LrMYpc/rwr6VAtVSXhRb
+# JtdXpyUvUzPu4ov9Hw3YFTX613J1N3x7huvHsajt4QitxwptEKH1H7cpXOqtypYp
+# nCwK4rI6EYSaj/HYlAC6jPQaCtZbfSgfnSZmg2c8z10MAXpuNQuBO89TQuq+g0ta
+# s7s7QEHbe0Y2plCfu1TBoZdHVGpN9FVnHcjncZ2SyCePvHQt9jZwjtXBw3RJbunb
+# vGTuSVjPOwqldghc/nj7bOL67ayBjaGCF5UwgheRBgorBgEEAYI3AwMBMYIXgTCC
+# F30GCSqGSIb3DQEHAqCCF24wghdqAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFQBgsq
+# hkiG9w0BCRABBKCCAT8EggE7MIIBNwIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFl
+# AwQCAQUABCBxkFIzH6RrVmo+Wk3Z6CHtowjhTWlCHhZxItlKXB+FkgIGaEtKidKJ
+# GBEyMDI1MDYxODIwNTMyMC44WjAEgAIB9KCB0aSBzjCByzELMAkGA1UEBhMCVVMx
+# EzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoT
+# FU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjElMCMGA1UECxMcTWljcm9zb2Z0IEFtZXJp
+# Y2EgT3BlcmF0aW9uczEnMCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOkUwMDItMDVF
+# MC1EOTQ3MSUwIwYDVQQDExxNaWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNloIIR
+# 7TCCByAwggUIoAMCAQICEzMAAAILEZ1WKZL5v4UAAQAAAgswDQYJKoZIhvcNAQEL
+# BQAwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
+# B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
+# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTAwHhcNMjUwMTMwMTk0MjU4
+# WhcNMjYwNDIyMTk0MjU4WjCByzELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hp
+# bmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
+# b3JhdGlvbjElMCMGA1UECxMcTWljcm9zb2Z0IEFtZXJpY2EgT3BlcmF0aW9uczEn
+# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOkUwMDItMDVFMC1EOTQ3MSUwIwYDVQQD
+# ExxNaWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNlMIICIjANBgkqhkiG9w0BAQEF
+# AAOCAg8AMIICCgKCAgEAqqz4rUYwF6hYdiB80GA97spAz8iRfu/XuQpGOGmLG/d0
+# Fbp+H2dybv9Fh67QBdybMEogFZe6dR9sxSq78oWlbkWHEnO2Lsj9BhxFau2FUubh
+# d2C5S3qMhjjyklxrOmoFutAqlQYT0Ptp+PXumA/cBr+mNB5gSpp0KmPwCiYo4FIk
+# bpW9aLzRHE2ZkzUbtZmPtCY4hLrPnheulTaAb9WtjFtCT2GxQYT8xR5XXRV3I39q
+# iJG+QWFrBS+0JQY1wKX9h5jaz8xt+oNcm6Pyp0Y0oCEaR3mF8QSGghBrUdRJqSfd
+# DkhR8VLu3iI1X3p6p1bWoNMgEGO8xFklzDevgh4790gTbZuWSEcsgrFGRvOOeCvv
+# OuW8OxcLh/L5OUPtOyuZRWNNngQ8N1Cs1o1r6k6dqSvDE2uJKM75SoK0hqebIeex
+# p5I5bzb7e/DV22U1SK8Eu8XCBo270v9q+ZUQ0/kNz9rU/oOigz3S57ZXGxXR7rs8
+# icsdFnwq/Mx7/MBggd6jzm0VyuKKQCJ0kOI+YktvCgEyRsEGm0bnmb4b3fTndMHB
+# WDm+KK1L9XQ+V8BcipRgzzHEzzkK9IMZhEFay4iRKC8slvBFf2gxVF06McoX81me
+# g3NJfXnrYdRLdjUNwP6gUecd96YynRyVSecaadgCN2czWCwwqjtZbYc9Rmks/j0C
+# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBRmXCyI36/pelnjLoRPYLMXvfI//jAfBgNV
+# HSMEGDAWgBSfpxVdAF5iXYP05dJlpxtTNRnpcjBfBgNVHR8EWDBWMFSgUqBQhk5o
+# dHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBU
+# aW1lLVN0YW1wJTIwUENBJTIwMjAxMCgxKS5jcmwwbAYIKwYBBQUHAQEEYDBeMFwG
+# CCsGAQUFBzAChlBodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRz
+# L01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0ElMjAyMDEwKDEpLmNydDAMBgNV
+# HRMBAf8EAjAAMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIH
+# gDANBgkqhkiG9w0BAQsFAAOCAgEAmij1Z+hi3J5GzxHTNEfauGZtPuyXxtOfqZqj
+# +pwOEsE9upPR5SUI6sP/lpIkCw+KMCcaKCK/TA2W4mV+sqT4RfoNT+bvAThFz2GJ
+# DlqcxRi0S7ZWR738aagCGu5oyxhw8yq/9dNgF2g+JhsnRMGixoVJ/QwRnTJuXYYo
+# rFgKm/yzeJZuDrl+GC6inFv9MknByoKaxoC2Puqar9Mz1O+I+3gq/jw0zWDPLRSf
+# 27VJwTS8jhOFmcASKuLZ7143dnAjrYFJ6EIxVNWWO2VnZ8twSW394Qa29zQdiFOJ
+# 7uttrVa29XzZMHb0+dNVkVATHfaBX+MYn49o9gpW79VxpY15nesiY77fmwbryS1L
+# nPZvrzCjlskcFHbzpfxOWvM1dzK4wp2OnyKy0DcwTmepJSAjwovthqm1YjNAiOgm
+# 2cqXouUa/YSWx/K2RM42mFi56/1z7FNMK9k5+i/XScdqvywKCvqL4gCJ49Gj+Ika
+# zMlEjuii9isGOsyXOkg8Wx5MGB3UEazzT90rrTIOi4AUr7Zn6sIGlyB5AqIlBRAM
+# /XBiKr4IxqRqaSk3E7qKNxBIKf80XdMMVtEKpld8oGBonHp99CgFh6yhQvEm8HOq
+# guKaHVWWCWZoqxwT/7qO7EJ3uR9MbXbw5lw1H8uYDYy5Y0CFLCYUEssl20o0m9mu
+# Y4TlH8cwggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
+# DQEBCwUAMIGIMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4G
+# A1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIw
+# MAYDVQQDEylNaWNyb3NvZnQgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAx
+# MDAeFw0yMTA5MzAxODIyMjVaFw0zMDA5MzAxODMyMjVaMHwxCzAJBgNVBAYTAlVT
+# MRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQK
+# ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1l
+# LVN0YW1wIFBDQSAyMDEwMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA
+# 5OGmTOe0ciELeaLL1yR5vQ7VgtP97pwHB9KpbE51yMo1V/YBf2xK4OK9uT4XYDP/
+# XE/HZveVU3Fa4n5KWv64NmeFRiMMtY0Tz3cywBAY6GB9alKDRLemjkZrBxTzxXb1
+# hlDcwUTIcVxRMTegCjhuje3XD9gmU3w5YQJ6xKr9cmmvHaus9ja+NSZk2pg7uhp7
+# M62AW36MEBydUv626GIl3GoPz130/o5Tz9bshVZN7928jaTjkY+yOSxRnOlwaQ3K
+# Ni1wjjHINSi947SHJMPgyY9+tVSP3PoFVZhtaDuaRr3tpK56KTesy+uDRedGbsoy
+# 1cCGMFxPLOJiss254o2I5JasAUq7vnGpF1tnYN74kpEeHT39IM9zfUGaRnXNxF80
+# 3RKJ1v2lIH1+/NmeRd+2ci/bfV+AutuqfjbsNkz2K26oElHovwUDo9Fzpk03dJQc
+# NIIP8BDyt0cY7afomXw/TNuvXsLz1dhzPUNOwTM5TI4CvEJoLhDqhFFG4tG9ahha
+# YQFzymeiXtcodgLiMxhy16cg8ML6EgrXY28MyTZki1ugpoMhXV8wdJGUlNi5UPkL
+# iWHzNgY1GIRH29wb0f2y1BzFa/ZcUlFdEtsluq9QBXpsxREdcu+N+VLEhReTwDwV
+# 2xo3xwgVGD94q0W29R6HXtqPnhZyacaue7e3PmriLq0CAwEAAaOCAd0wggHZMBIG
+# CSsGAQQBgjcVAQQFAgMBAAEwIwYJKwYBBAGCNxUCBBYEFCqnUv5kxJq+gpE8RjUp
+# zxD/LwTuMB0GA1UdDgQWBBSfpxVdAF5iXYP05dJlpxtTNRnpcjBcBgNVHSAEVTBT
+# MFEGDCsGAQQBgjdMg30BATBBMD8GCCsGAQUFBwIBFjNodHRwOi8vd3d3Lm1pY3Jv
+# c29mdC5jb20vcGtpb3BzL0RvY3MvUmVwb3NpdG9yeS5odG0wEwYDVR0lBAwwCgYI
+# KwYBBQUHAwgwGQYJKwYBBAGCNxQCBAweCgBTAHUAYgBDAEEwCwYDVR0PBAQDAgGG
+# MA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0jBBgwFoAU1fZWy4/oolxiaNE9lJBb186a
+# GMQwVgYDVR0fBE8wTTBLoEmgR4ZFaHR0cDovL2NybC5taWNyb3NvZnQuY29tL3Br
+# aS9jcmwvcHJvZHVjdHMvTWljUm9vQ2VyQXV0XzIwMTAtMDYtMjMuY3JsMFoGCCsG
+# AQUFBwEBBE4wTDBKBggrBgEFBQcwAoY+aHR0cDovL3d3dy5taWNyb3NvZnQuY29t
+# L3BraS9jZXJ0cy9NaWNSb29DZXJBdXRfMjAxMC0wNi0yMy5jcnQwDQYJKoZIhvcN
+# AQELBQADggIBAJ1VffwqreEsH2cBMSRb4Z5yS/ypb+pcFLY+TkdkeLEGk5c9MTO1
+# OdfCcTY/2mRsfNB1OW27DzHkwo/7bNGhlBgi7ulmZzpTTd2YurYeeNg2LpypglYA
+# A7AFvonoaeC6Ce5732pvvinLbtg/SHUB2RjebYIM9W0jVOR4U3UkV7ndn/OOPcbz
+# aN9l9qRWqveVtihVJ9AkvUCgvxm2EhIRXT0n4ECWOKz3+SmJw7wXsFSFQrP8DJ6L
+# GYnn8AtqgcKBGUIZUnWKNsIdw2FzLixre24/LAl4FOmRsqlb30mjdAy87JGA0j3m
+# Sj5mO0+7hvoyGtmW9I/2kQH2zsZ0/fZMcm8Qq3UwxTSwethQ/gpY3UA8x1RtnWN0
+# SCyxTkctwRQEcb9k+SS+c23Kjgm9swFXSVRk2XPXfx5bRAGOWhmRaw2fpCjcZxko
+# JLo4S5pu+yFUa2pFEUep8beuyOiJXk+d0tBMdrVXVAmxaQFEfnyhYWxz/gq77EFm
+# PWn9y8FBSX5+k77L+DvktxW/tM4+pTFRhLy/AsGConsXHRWJjXD+57XQKBqJC482
+# 2rpM+Zv/Cuk0+CQ1ZyvgDbjmjJnW4SLq8CdCPSWU5nR0W2rRnj7tfqAxM328y+l7
+# vzhwRNGQ8cirOoo6CGJ/2XBjU02N7oJtpQUQwXEGahC0HVUzWLOhcGbyoYIDUDCC
+# AjgCAQEwgfmhgdGkgc4wgcsxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5n
+# dG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9y
+# YXRpb24xJTAjBgNVBAsTHE1pY3Jvc29mdCBBbWVyaWNhIE9wZXJhdGlvbnMxJzAl
+# BgNVBAsTHm5TaGllbGQgVFNTIEVTTjpFMDAyLTA1RTAtRDk0NzElMCMGA1UEAxMc
+# TWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaIjCgEBMAcGBSsOAwIaAxUAqEJ3
+# VCTdz6atsYfEYbbEd+TQmcGggYMwgYCkfjB8MQswCQYDVQQGEwJVUzETMBEGA1UE
+# CBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9z
+# b2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGltZS1TdGFtcCBQ
+# Q0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAOv9CM0wIhgPMjAyNTA2MTgwOTQzNDFa
+# GA8yMDI1MDYxOTA5NDM0MVowdzA9BgorBgEEAYRZCgQBMS8wLTAKAgUA6/0IzQIB
+# ADAKAgEAAgIDywIB/zAHAgEAAgIStjAKAgUA6/5aTQIBADA2BgorBgEEAYRZCgQC
+# MSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAIDAYagMA0GCSqG
+# SIb3DQEBCwUAA4IBAQC1vEVo67ItwWNwG2y8/WW3gxhNCT1neTOaB4bnLBBeqaDy
+# E2qHMWqyXm1TJjZND7WjKvvdgd1vaU8sEL2tsqj+KnJM1TgtyD0lmA2CU3GmJdk9
+# /d79Pjwhm80cPT/yw8jP5hTETN3kDKNIshhU7l4d3iqWwLgYXOPi71Fzk8mK1onb
+# yivLTQGk0qOL/0JeHxHSXN4jTlJdUVI7DAR+dwqqrHQZ42bcNuDB5qtl/ymaqt4X
+# nTmrsAgUH7zPFjuWk3z7fZFWGUri14g78dZHxzhT0idd60moaHIHfi4us8Fmay6Q
+# pfte7dV7CoSv6ZHHZUNX1bgvwIxM1w1ZdBJZKw8sMYIEDTCCBAkCAQEwgZMwfDEL
+# MAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1v
+# bmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UEAxMdTWlj
+# cm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAILEZ1WKZL5v4UAAQAAAgsw
+# DQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG9w0BCRABBDAv
+# BgkqhkiG9w0BCQQxIgQgq6BwCg6SxAQ88/RjZt73JwmEx95rM7G3uG2Y3s6b1Tsw
+# gfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCA01XSruje+24dMHTshfqIETfLy
+# iXMOY539vxLrLGJKMzCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpX
+# YXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQg
+# Q29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1wIFBDQSAy
+# MDEwAhMzAAACCxGdVimS+b+FAAEAAAILMCIEIMzxN0DPbanU6in7LkGaMGrJ4eCN
+# haXk91OjixpDQPYhMA0GCSqGSIb3DQEBCwUABIICABOmgmFCOIpO06iOF4G2xvyT
+# AwLC4j1aIRklja6CE24TWtME+rvOf74nWoShKEOtyPlEOOAh2wRzlRfdOCpajwYX
+# 4sgl759fJJGN2asJTG7jSw8j6FZiW0SBzOD3InkJ88L5iMsCJv/QH1O+j/wazLZp
+# DeKSnRcYIDNg6n7VoB/DSPakJxNkGOjqAL7uTDHvB8nwmQriqjbjK0riuZ4cDcYX
+# cJz4FyvIUoRk5aqm2t63QH0R6zd0oGLr/uFj1bdQLq34Flat43MdWs3x43Cvzr9B
+# YW9Cgckc0wXrt+/mGSg02jLLLRmcujltG1tfwIC2DPfziL3vZfwIvA/QDbiH70Ws
+# J3aOzA+YuMvzcGHSwn4GrqggKLUyqjFmFsULx5OvwPa0eDcyEGjYzqGV/wUeCYs1
+# AAcqgdyU8IBA3aOLJgwQ8ZUqSiH3Lq0HfDPKKGINQYr/4RvhRU1D7yXIGrht5TRa
+# x8XwPcIwFspdVSsRm1a+QEttNFx1vgh4NTglEIpUHyXTz57rPID+uxU7j8MWUUNC
+# +RjlUmQO2mEX5G+J1XS3KNc2gMTQlmIjY0WTrOIiqaJUhTiEVLd/BbQrscHsOKDr
+# h8Imj6Isz6pG1ergGOsyqSTQ5lW9Y9bW5tIY05AIg0Z2Y70k1yVnRfvTPCrerwPw
+# kyhkDpB2yC3DFGUQMEvv
+# SIG # End signature block
