@@ -18,8 +18,7 @@ Extract the files to their respective folders. The folder names should match bel
 5. webkit-2191
 6. winldd-1007
 
+The version numbers at the end of the folder can be found in the download URL above. It is critical to use the same version numbers in the folder names.
 
-The downloaded files should be in folder "C:\Users\[user]\AppData\Local\ms-playwright"
-
-Folder structure:
-
+## Copy folders & files
+Copy the folders and the files to "C:\Users\[user]\AppData\Local\ms-playwright"
